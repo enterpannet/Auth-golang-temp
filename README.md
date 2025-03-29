@@ -1,204 +1,229 @@
-# คู่มือระบบ Authentication Service
+# Auth Service
 
-## ขั้นตอนการเริ่มต้นใช้งาน
-1. ติดตั้ง dependencies: `go get -u ./...`
-2. ตั้งค่าฐานข้อมูล PostgreSQL:
-   - ต้องติดตั้ง PostgreSQL เวอร์ชัน 12 ขึ้นไป
-   - ระบบจะตรวจสอบและสร้างฐานข้อมูลให้โดยอัตโนมัติ หากยังไม่มี
-   - กำหนดค่า PostgreSQL ในไฟล์ `config/config.go` ตามความต้องการ
-3. เริ่มต้นเซิร์ฟเวอร์: `go run cmd/server/main.go`
-4. เซิร์ฟเวอร์จะทำงานที่ `localhost:8080`
+ระบบจัดการการยืนยันตัวตน (Authentication Service) ที่มีความปลอดภัยสูงและมีฟีเจอร์ครบถ้วน
 
-## เทคโนโลยีและเฟรมเวิร์กที่ใช้
+## คุณสมบัติหลัก
 
-### Gin Framework
-ระบบใช้ [Gin Framework](https://github.com/gin-gonic/gin) ซึ่งเป็น HTTP web framework ที่มีประสิทธิภาพสูงสำหรับ Go
-ด้วยคุณสมบัติดังนี้:
-- Performance ที่เร็วกว่า net/http มาตรฐาน
-- Middleware ที่หลากหลายและใช้งานง่าย
-- การผูกข้อมูล (binding) จาก request ที่มีประสิทธิภาพ
-- การจัดการ route ที่มีความยืดหยุ่น
+- **การจัดการผู้ใช้**: ลงทะเบียน, เข้าสู่ระบบ, รีเซ็ตรหัสผ่าน
+- **การพิสูจน์ตัวตนหลายปัจจัย (MFA)**: รองรับ TOTP (Time-based One-Time Password)
+- **OAuth 2.0**: รองรับการเข้าสู่ระบบผ่าน Google, Facebook, GitHub
+- **JWT Authentication**: จัดการ Access Token และ Refresh Token
+- **ระบบจัดการสิทธิ์**: บทบาท (Roles) และสิทธิ์การเข้าถึง (Permissions)
+- **การบันทึกประวัติความปลอดภัย**: บันทึกกิจกรรมที่สำคัญทั้งหมดสำหรับการตรวจสอบ
+- **ระบบจัดการผู้ใช้สำหรับผู้ดูแลระบบ**: จัดการผู้ใช้และสิทธิ์อย่างสมบูรณ์
 
-### GORM
-ระบบใช้ [GORM](https://gorm.io/) เป็น ORM (Object Relational Mapping) ที่ช่วยในการจัดการฐานข้อมูล
-โดยมีคุณสมบัติดังนี้:
-- Auto Migration สำหรับสร้างและอัปเดตโครงสร้างฐานข้อมูล
-- การทำงานกับ Relation และ Association
-- Hooks และ Callbacks สำหรับการจัดการชีวิตของข้อมูล
-- Transaction และการจัดการข้อผิดพลาด
+## ความต้องการของระบบ
+
+- Go 1.20 หรือสูงกว่า
+- PostgreSQL 12 หรือสูงกว่า
+- Docker (เสริม สำหรับการใช้งานกับ Docker)
+
+## การติดตั้ง
+
+1. โคลนโปรเจค
+
+```bash
+git clone https://github.com/your-org/auth-service.git
+cd auth-service
+```
+
+2. ติดตั้ง dependencies
+
+```bash
+go mod download
+```
+
+3. ตั้งค่าฐานข้อมูล PostgreSQL
+
+ตรวจสอบให้แน่ใจว่าคุณมี PostgreSQL เวอร์ชัน 12 หรือสูงกว่าที่ติดตั้งและทำงานอยู่ ระบบจะตรวจสอบและสร้างฐานข้อมูลโดยอัตโนมัติหากยังไม่มี
+
+คุณสามารถกำหนดค่าการเชื่อมต่อกับฐานข้อมูลได้ที่ไฟล์ `config/config.go`
+
+4. สร้าง config.yaml (เสริม)
+
+```bash
+cp config/config.example.yaml config/config.yaml
+```
+
+แก้ไขไฟล์ config.yaml ตามความเหมาะสม
+
+5. รันแอปพลิเคชัน
+
+```bash
+# สำหรับการพัฒนา
+go run cmd/server/main.go
+
+# หรือใช้ Air สำหรับ hot reload
+air
+```
+
+## การตั้งค่า Hot Reload (สำหรับการพัฒนา)
+
+ติดตั้ง Air เพื่อใช้ Hot Reload:
+
+```bash
+go install github.com/air-verse/air@latest
+```
+
+รัน Air ในโฟลเดอร์โปรเจค:
+
+```bash
+air
+```
 
 ## API Endpoints
 
-### การลงทะเบียน (Register)
-```
-POST /auth/register
-```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "email": "user@example.com",
-  "username": "user123",
-  "password": "SecurePassword123!",
-  "confirm_password": "SecurePassword123!",
-  "first_name": "John",
-  "last_name": "Doe"
-}
-```
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "access_token": "eyJhbGc...",
-  "token_type": "Bearer",
-  "expires_at": "2023-05-01T15:00:00Z"
-}
+### การยืนยันตัวตน
+
+| Endpoint | Method | คำอธิบาย |
+|----------|--------|----------|
+| `/auth/register` | POST | ลงทะเบียนผู้ใช้ใหม่ |
+| `/auth/login` | POST | เข้าสู่ระบบ |
+| `/auth/refresh` | POST | รีเฟรช access token |
+| `/auth/logout` | POST | ออกจากระบบ (ยกเลิก token) |
+
+### การยืนยันตัวตนแบบหลายปัจจัย (MFA)
+
+| Endpoint | Method | คำอธิบาย |
+|----------|--------|----------|
+| `/auth/mfa/setup` | POST | ตั้งค่า MFA |
+| `/auth/mfa/verify` | POST | ยืนยัน MFA |
+| `/auth/mfa/disable` | POST | ปิดการใช้งาน MFA |
+| `/auth/mfa/backup-codes` | POST | สร้างรหัสสำรอง |
+
+### การจัดการผู้ใช้ (ผู้ดูแลระบบ)
+
+| Endpoint | Method | คำอธิบาย |
+|----------|--------|----------|
+| `/api/v1/admin/users` | GET | รายการผู้ใช้ทั้งหมด |
+| `/api/v1/admin/users` | POST | สร้างผู้ใช้ใหม่ |
+| `/api/v1/admin/users/:id` | GET | ข้อมูลผู้ใช้ |
+| `/api/v1/admin/users/:id` | PUT | อัปเดตผู้ใช้ |
+| `/api/v1/admin/users/:id` | DELETE | ลบผู้ใช้ |
+| `/api/v1/admin/users/:id/reset-password` | POST | รีเซ็ตรหัสผ่านผู้ใช้ |
+| `/api/v1/admin/roles` | GET | รายการบทบาททั้งหมด |
+
+## ตัวอย่างการใช้งาน API
+
+### ลงทะเบียนผู้ใช้ใหม่
+
+```bash
+curl -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "username": "testuser",
+    "password": "SecurePassword123!",
+    "confirm_password": "SecurePassword123!",
+    "first_name": "Test",
+    "last_name": "User"
+  }'
 ```
 
-### การเข้าสู่ระบบ (Login)
-```
-POST /auth/login
-```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "email": "user@example.com",
-  "password": "SecurePassword123!",
-  "totp_code": "123456",
-  "remember_me": true
-}
-```
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "access_token": "eyJhbGc...",
-  "refresh_token": "eyJhbGc...",
-  "token_type": "Bearer",
-  "expires_at": "2023-05-01T15:00:00Z"
-}
+### เข้าสู่ระบบ
+
+```bash
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "SecurePassword123!"
+  }'
 ```
 
-### การรีเฟรชโทเค็น (Refresh Token)
-```
-POST /auth/refresh
-```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "refresh_token": "eyJhbGc..."
-}
-```
-**หรือส่งคุกกี้ `refresh_token` ในการร้องขอ**
+### ตั้งค่า MFA
 
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "access_token": "eyJhbGc...",
-  "token_type": "Bearer",
-  "expires_at": "2023-05-01T15:00:00Z"
-}
+```bash
+curl -X POST http://localhost:8080/auth/mfa/setup \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN"
 ```
 
-### การออกจากระบบ (Logout)
-```
-POST /auth/logout
-```
-**Header ที่ต้องส่ง:** 
-```
-Authorization: Bearer <access_token>
-```
+## การจัดการผู้ใช้สำหรับผู้ดูแลระบบ
 
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "success": true
-}
-```
+ระบบมีฟีเจอร์การจัดการผู้ใช้สำหรับผู้ดูแลระบบที่สมบูรณ์ ทำให้ผู้ดูแลระบบสามารถ:
 
-## การตั้งค่าระบบ
-แก้ไขการตั้งค่าได้ที่ไฟล์ `config/config.go` โดยมีการตั้งค่าดังนี้:
+1. **ดูรายการผู้ใช้ทั้งหมด**: สามารถค้นหา, กรอง และแบ่งหน้าข้อมูลผู้ใช้
+   ```
+   GET /api/v1/admin/users?page=1&limit=20&search=คำค้นหา&role=admin
+   ```
 
-### การตั้งค่าพื้นฐาน
-- Environment
-- Debug mode
-- Server configuration
-- Database configuration
+2. **ดูข้อมูลผู้ใช้เฉพาะราย**:
+   ```
+   GET /api/v1/admin/users/{user_id}
+   ```
 
-### การตั้งค่าความปลอดภัย
-- JWT Secret Key
-- Token Expiry
-- CSRF Protection
-- Rate Limiting
-- Content Security Policy
+3. **สร้างผู้ใช้ใหม่**:
+   ```
+   POST /api/v1/admin/users
+   ```
+   ตัวอย่าง payload:
+   ```json
+   {
+     "email": "user@example.com",
+     "username": "newuser",
+     "password": "securepassword",
+     "confirm_password": "securepassword",
+     "first_name": "John",
+     "last_name": "Doe",
+     "roles": ["admin", "user"],
+     "is_verified": true
+   }
+   ```
 
-## ความปลอดภัย
-ระบบมีการป้องกันความปลอดภัยดังนี้:
+4. **แก้ไขข้อมูลผู้ใช้**:
+   ```
+   PUT /api/v1/admin/users/{user_id}
+   ```
+   ตัวอย่าง payload:
+   ```json
+   {
+     "email": "updated@example.com",
+     "username": "updateduser",
+     "first_name": "Updated",
+     "last_name": "User",
+     "roles": ["user"],
+     "is_verified": true,
+     "is_locked": false
+   }
+   ```
 
-### ป้องกัน CSRF (Cross-Site Request Forgery)
-- ใช้ CSRF Token ในฟอร์มและ API
+5. **ลบผู้ใช้**:
+   ```
+   DELETE /api/v1/admin/users/{user_id}
+   ```
 
-### การป้องกัน Rate Limiting
-- จำกัดจำนวนคำขอต่อ IP address
-- จำกัดจำนวนการพยายามเข้าสู่ระบบ
-- จำกัดจำนวนการลงทะเบียน
+6. **รีเซ็ตรหัสผ่านผู้ใช้**:
+   ```
+   POST /api/v1/admin/users/{user_id}/reset-password
+   ```
+   ตัวอย่าง payload:
+   ```json
+   {
+     "password": "newpassword123",
+     "confirm_password": "newpassword123"
+   }
+   ```
 
-### การเข้ารหัส
-- เข้ารหัสรหัสผ่านด้วย Argon2id
-- การเข้ารหัสข้อมูลสำคัญด้วย AES-GCM
+7. **ดูรายการบทบาททั้งหมด**:
+   ```
+   GET /api/v1/admin/roles
+   ```
 
-### การยืนยันตัวตนหลายขั้นตอน (MFA)
-- รองรับ TOTP (Time-based One-Time Password)
-- สร้างรหัสสำรองสำหรับการกู้คืน
-- สร้าง QR Code สำหรับแอพ Authenticator
+## การตั้งค่า Multi-Factor Authentication (MFA)
 
-## การเชื่อมต่อกับ OAuth Providers
-ระบบรองรับการเข้าสู่ระบบผ่าน:
-- Google
-- Facebook
-- GitHub
+ระบบรองรับการยืนยันตัวตนแบบหลายปัจจัยโดยใช้ TOTP (Time-based One-Time Password) โดยสามารถกำหนดได้ว่า MFA เป็นตัวเลือกหรือบังคับใช้
 
-### การตั้งค่า OAuth
-ตั้งค่า Client ID และ Secret ในไฟล์ `config/config.go`:
+### การตั้งค่าบังคับใช้ MFA
+
+ผู้ดูแลระบบสามารถกำหนดให้ผู้ใช้ทุกคนต้องใช้ MFA โดยการตั้งค่าในไฟล์ `config/config.go`:
 
 ```go
-OAuthProviders: map[string]OAuthProviderConfig{
-    "google": {
-        ClientID:     "your-client-id",
-        ClientSecret: "your-client-secret",
-        RedirectURL:  "http://localhost:8080/auth/callback/google",
-        Scopes:       []string{"openid", "profile", "email"},
-    },
-    // อื่นๆ...
+Auth: AuthConfig{
+  // ... ค่าอื่นๆ
+  MFARequired: true, // ตั้งเป็น true เพื่อบังคับใช้ MFA กับผู้ใช้ทุกคน
 }
 ```
-
-## การพัฒนาเพิ่มเติม
-1. ทำการตั้งค่าฐานข้อมูล PostgreSQL
-2. ตั้งค่า JWT Secret ที่ปลอดภัย
-3. กำหนดค่า CORS policy และ CSP headers ให้เหมาะสม
-
-## การใช้งาน JWT Token
-ส่ง token ในหัว HTTP Header ทุกครั้งที่เรียกใช้ API ที่ต้องการยืนยันตัวตน:
-```
-Authorization: Bearer <access_token>
-```
-
-## การดูแลระบบ
-- ระบบมีการบันทึกเหตุการณ์ผ่าน Audit Log
-- สามารถตรวจสอบการเข้าถึงระบบได้
-- มีการบันทึกเหตุการณ์สำคัญเช่น การเข้าสู่ระบบล้มเหลวหลายครั้ง
-
-## การพัฒนาและขยายระบบ
-หากต้องการเพิ่มฟีเจอร์ใหม่ใน API:
-
-1. สร้าง model ใน `internal/models/`
-2. เพิ่ม service ใน `internal/auth/service.go`
-3. เพิ่ม handler ใน `internal/auth/handlers.go`
-4. เพิ่ม route ใน `internal/api/router.go`
-
-ระบบออกแบบให้เพิ่มฟีเจอร์ได้ง่ายโดยการใช้ Gin และ GORM ร่วมกัน
-
-## การตั้งค่า MFA (Multi-Factor Authentication)
-
-ระบบรองรับการยืนยันตัวตนแบบหลายปัจจัยโดยใช้ TOTP (Time-based One-Time Password)
 
 ### การเปิดใช้งาน MFA
 
@@ -207,81 +232,59 @@ Authorization: Bearer <access_token>
 ```
 POST /auth/mfa/setup
 ```
-**Header ที่ต้องส่ง:** 
-```
-Authorization: Bearer <access_token>
-```
 
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "secret": "BASE32ENCODEDSECRET",
-  "qr_code_url": "otpauth://totp/ExampleService:user@example.com?secret=BASE32ENCODEDSECRET&issuer=ExampleService&algorithm=SHA1&digits=6&period=30"
-}
-```
+2. ติดตั้งแอปพลิเคชัน Authenticator (เช่น Google Authenticator, Microsoft Authenticator, Authy) บนสมาร์ทโฟน
 
-2. นำค่า `qr_code_url` ไปสร้าง QR Code หรือใช้ค่า `secret` เพื่อตั้งค่าในแอพฯ Authenticator โดยตรง เช่น:
-   - Google Authenticator
-   - Microsoft Authenticator
-   - Authy
-   - หรือแอพฯ ที่รองรับ TOTP อื่นๆ
+3. สแกน QR code หรือเพิ่ม secret key ที่ได้รับจากการเรียก API ลงในแอปพลิเคชัน Authenticator
 
-3. เมื่อตั้งค่าในแอพฯ Authenticator แล้ว จะต้องยืนยันโดยส่งรหัส TOTP ที่ได้จากแอพฯ:
+4. ยืนยัน MFA โดยส่ง TOTP code ที่ได้จากแอปพลิเคชัน Authenticator:
 
 ```
 POST /auth/mfa/verify
 ```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "totp_code": "123456"
-}
-```
 
-**ข้อมูลที่ได้รับ (Response):**
-```json
-{
-  "enabled": true,
-  "backup_codes": ["ABCD-EFGH-IJKL", "MNOP-QRST-UVWX", ...]
-}
-```
+5. หลังจากยืนยันแล้ว ระบบจะสร้างรหัสสำรอง (Backup Codes) ให้ใช้ในกรณีฉุกเฉินที่ไม่สามารถเข้าถึงแอปพลิเคชัน Authenticator ได้
 
-เก็บรหัสสำรอง (backup_codes) ไว้ในที่ปลอดภัย เพื่อใช้ในกรณีที่ไม่สามารถเข้าถึงอุปกรณ์ที่มีแอพฯ Authenticator
+## ความปลอดภัย
 
-### การใช้งาน MFA เมื่อเข้าสู่ระบบ
+- **การเข้ารหัสข้อมูล**: ข้อมูลที่สำคัญทั้งหมดถูกเข้ารหัสก่อนเก็บในฐานข้อมูล
+- **การเข้ารหัสรหัสผ่าน**: ใช้อัลกอริทึม Argon2id ที่ทันสมัยและปลอดภัย
+- **JWT Token**: Access Tokens และ Refresh Tokens ปลอดภัย พร้อมระบบหมดอายุอัตโนมัติ
+- **MFA**: รองรับการยืนยันตัวตนด้วย TOTP
+- **Audit Logging**: บันทึกกิจกรรมที่สำคัญทั้งหมดสำหรับการตรวจสอบภายหลัง
+- **Rate Limiting**: ป้องกันการโจมตีแบบ brute force และ DDoS
+- **Role-Based Access Control**: ควบคุมการเข้าถึงตามบทบาทและสิทธิ์
 
-1. เมื่อลงชื่อเข้าใช้ด้วยอีเมลและรหัสผ่าน ระบบจะตรวจสอบว่าบัญชีมีการเปิดใช้งาน MFA หรือไม่
-2. ถ้าเปิดใช้งาน MFA แล้ว ระบบจะส่งคำตอบกลับมาพร้อมสถานะ `requires_mfa: true`
-3. ผู้ใช้จะต้องส่งรหัส TOTP จากแอพฯ Authenticator เพื่อยืนยันตัวตนอีกครั้ง:
+## โครงสร้างโปรเจค
 
 ```
-POST /auth/login
-```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "email": "user@example.com",
-  "password": "SecurePassword123!",
-  "totp_code": "123456" 
-}
-```
-
-รหัส TOTP จะเปลี่ยนทุก 30 วินาที และตัวเลขที่แสดงในแอพฯ Authenticator จะต้องถูกใช้ภายในช่วงเวลาที่กำหนด
-
-### การใช้รหัสสำรอง (Backup Codes)
-
-ในกรณีที่ไม่สามารถเข้าถึงอุปกรณ์ที่มีแอพฯ Authenticator ผู้ใช้สามารถใช้รหัสสำรองที่ได้รับเมื่อตั้งค่า MFA:
-
-```
-POST /auth/login
-```
-**ข้อมูลที่ส่ง (Request Body):**
-```json
-{
-  "email": "user@example.com",
-  "password": "SecurePassword123!",
-  "recovery_code": "ABCD-EFGH-IJKL"
-}
+auth-service/
+├── cmd/
+│   └── server/           # โค้ดหลักของเซิร์ฟเวอร์
+├── config/               # การตั้งค่าต่างๆ
+├── internal/
+│   ├── api/              # API routes และ handlers
+│   ├── auth/             # การยืนยันตัวตนและควบคุมการเข้าถึง
+│   ├── controllers/      # ตัวควบคุม HTTP
+│   ├── crypto/           # การเข้ารหัสและความปลอดภัย
+│   ├── database/         # การเชื่อมต่อฐานข้อมูล
+│   ├── logging/          # การบันทึกประวัติ
+│   ├── middleware/       # Middleware ต่างๆ
+│   └── models/           # โครงสร้างข้อมูล
+├── migrations/           # ไฟล์สำหรับการทำ migrations
+└── test/                 # ไฟล์ทดสอบ
 ```
 
-แต่ละรหัสสำรองสามารถใช้ได้เพียงครั้งเดียว และควรสร้างรหัสสำรองใหม่หลังจากใช้งาน
+## การนำไปใช้งานในโปรดักชัน
+
+สำหรับการใช้งานจริง ควรพิจารณาต่อไปนี้:
+
+1. **ตั้งค่า Environment Variables**: ใช้ environment variables แทนค่าคงที่ในไฟล์ config
+2. **ตั้งค่า HTTPS**: ใช้ HTTPS เสมอในโปรดักชัน (ด้วย reverse proxy หรือโดยตรง)
+3. **การกำหนดค่า Trusted Proxies**: กำหนดค่า trusted proxies ที่เหมาะสมหากใช้งานหลัง reverse proxy
+4. **การติดตั้ง Monitoring**: เพิ่มระบบ monitoring และ alerting
+5. **การตั้งค่า Rate Limits**: ปรับแต่งค่า rate limits ให้เหมาะสมกับปริมาณการใช้งาน
+
+## จัดทำโดย
+
+ทีมพัฒนา Auth Service

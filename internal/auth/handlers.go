@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/example/auth-service/config"
+	"github.com/example/auth-service/internal/crypto"
+	"github.com/example/auth-service/internal/models"
 	"github.com/gin-gonic/gin"
 )
 
@@ -48,16 +50,40 @@ type RefreshTokenRequest struct {
 
 // TokenResponse represents the response for token-related endpoints
 type TokenResponse struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token,omitempty"`
-	TokenType    string    `json:"token_type"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	RequiresMFA  bool      `json:"requires_mfa,omitempty"`
+	AccessToken   string    `json:"access_token"`
+	RefreshToken  string    `json:"refresh_token,omitempty"`
+	TokenType     string    `json:"token_type"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	RequiresMFA   bool      `json:"requires_mfa,omitempty"`
+	NeedsMFASetup bool      `json:"needs_mfa_setup,omitempty"`
 }
 
 // errorResponse represents a JSON error response
 type errorResponse struct {
 	Error string `json:"error"`
+}
+
+// SetupMFARequest represents the request to set up MFA
+type SetupMFARequest struct {
+	UserID string `json:"-"` // Set from authenticated context
+}
+
+// SetupMFAResponse represents the response for MFA setup
+type SetupMFAResponse struct {
+	Secret    string `json:"secret"`
+	QRCodeURL string `json:"qr_code_url"`
+}
+
+// VerifyMFARequest represents the request to verify and enable MFA
+type VerifyMFARequest struct {
+	UserID   string `json:"-"` // Set from authenticated context
+	TOTPCode string `json:"totp_code"`
+}
+
+// VerifyMFAResponse represents the response after enabling MFA
+type VerifyMFAResponse struct {
+	Enabled     bool     `json:"enabled"`
+	BackupCodes []string `json:"backup_codes,omitempty"`
 }
 
 // Register handles user registration
@@ -148,9 +174,16 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	// Check if MFA is required
 	if result.RequiresMFA {
-		sendJSON(w, map[string]interface{}{
+		response := map[string]interface{}{
 			"requires_mfa": true,
-		}, http.StatusOK)
+		}
+
+		// Add flag if MFA setup is needed
+		if result.NeedsMFASetup {
+			response["needs_mfa_setup"] = true
+		}
+
+		sendJSON(w, response, http.StatusOK)
 		return
 	}
 
@@ -415,7 +448,14 @@ func (h *Handler) GinLogin(c *gin.Context) {
 
 	// Check if MFA is required
 	if result.RequiresMFA {
-		c.JSON(http.StatusOK, gin.H{"requires_mfa": true})
+		response := gin.H{"requires_mfa": true}
+
+		// Add flag if MFA setup is needed
+		if result.NeedsMFASetup {
+			response["needs_mfa_setup"] = true
+		}
+
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
@@ -542,4 +582,175 @@ func (h *Handler) GinRefreshToken(c *gin.Context) {
 		TokenType:   "Bearer",
 		ExpiresAt:   result.ExpiresAt,
 	})
+}
+
+// GinSetupMFA handles MFA setup request for Gin
+func (h *Handler) GinSetupMFA(c *gin.Context) {
+	// Get user ID from context
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	user := models.User{}
+	if err := h.Service.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Generate TOTP secret
+	secret, qrCodeURL, err := h.Service.TOTPManager.GenerateTOTPSecret(crypto.TOTPOptions{
+		AccountName: user.Email,
+		Issuer:      h.Config.Auth.TOTPIssuer,
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate TOTP secret"})
+		return
+	}
+
+	// Store temporary secret in user record
+	if err := h.Service.DB.Model(&user).Update("totp_secret", secret).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save TOTP secret"})
+		return
+	}
+
+	// Return the secret and QR code URL
+	c.JSON(http.StatusOK, SetupMFAResponse{
+		Secret:    secret,
+		QRCodeURL: qrCodeURL,
+	})
+}
+
+// GinVerifyMFA handles MFA verification and enabling for Gin
+func (h *Handler) GinVerifyMFA(c *gin.Context) {
+	// Get user ID from context
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// Parse request
+	var req VerifyMFARequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Get user
+	user := models.User{}
+	if err := h.Service.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Verify TOTP code
+	valid, err := h.Service.TOTPManager.ValidateTOTP(user.TOTPSecret, req.TOTPCode, 1)
+	if err != nil || !valid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid TOTP code"})
+		return
+	}
+
+	// Generate backup codes
+	backupCodes, err := h.Service.TOTPManager.GenerateBackupCodes(10)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate backup codes"})
+		return
+	}
+
+	// TODO: Store backup codes securely (hashed)
+
+	// Enable MFA for the user
+	if err := h.Service.DB.Model(&user).Updates(map[string]interface{}{
+		"totp_enabled": true,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to enable MFA"})
+		return
+	}
+
+	// Log MFA enable
+	h.Service.AuditLogger.LogMFAEnable(c.Request.Context(),
+		user.ID, c.ClientIP(), c.Request.UserAgent(), true, "MFA enabled")
+
+	// Return response
+	c.JSON(http.StatusOK, VerifyMFAResponse{
+		Enabled:     true,
+		BackupCodes: backupCodes,
+	})
+}
+
+// GinDisableMFA handles disabling MFA for Gin
+func (h *Handler) GinDisableMFA(c *gin.Context) {
+	// Get user ID from context
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// Get user
+	user := models.User{}
+	if err := h.Service.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Check if MFA is enabled
+	if !user.TOTPEnabled {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MFA is not enabled"})
+		return
+	}
+
+	// Disable MFA
+	if err := h.Service.DB.Model(&user).Updates(map[string]interface{}{
+		"totp_enabled": false,
+		"totp_secret":  "",
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to disable MFA"})
+		return
+	}
+
+	// Log MFA disable
+	h.Service.AuditLogger.LogMFADisable(c.Request.Context(),
+		user.ID, c.ClientIP(), c.Request.UserAgent(), true, "MFA disabled")
+
+	// Return response
+	c.JSON(http.StatusOK, gin.H{"disabled": true})
+}
+
+// GinGenerateBackupCodes handles generating new backup codes for Gin
+func (h *Handler) GinGenerateBackupCodes(c *gin.Context) {
+	// Get user ID from context
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	// Get user
+	user := models.User{}
+	if err := h.Service.DB.First(&user, "id = ?", userID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Check if MFA is enabled
+	if !user.TOTPEnabled {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MFA is not enabled"})
+		return
+	}
+
+	// Generate new backup codes
+	backupCodes, err := h.Service.TOTPManager.GenerateBackupCodes(10)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate backup codes"})
+		return
+	}
+
+	// TODO: Store backup codes securely (hashed)
+
+	// Return response
+	c.JSON(http.StatusOK, gin.H{"backup_codes": backupCodes})
 }

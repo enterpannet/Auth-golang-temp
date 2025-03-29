@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ยืนยันที่อยู่อีเมลของคุณ</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            padding: 30px;
+            border: 1px solid #e0e0e0;
+        }
+        .header {
+            text-align: center;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e0e0e0;
+            margin-bottom: 20px;
+        }
+        .header h1 {
+            color: #2c3e50;
+            margin: 0;
+            font-size: 24px;
+        }
+        .content {
+            margin-bottom: 30px;
+        }
+        .button {
+            display: block;
+            text-align: center;
+            background-color: #3498db;
+            color: white;
+            text-decoration: none;
+            padding: 12px 20px;
+            border-radius: 4px;
+            font-weight: bold;
+            margin: 30px auto;
+            width: 200px;
+        }
+        .footer {
+            text-align: center;
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+        .expiry {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-left: 4px solid #3498db;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>ยืนยันที่อยู่อีเมลของคุณ</h1>
+        </div>
+        
+        <div class="content">
+            <p>สวัสดี {{.Username}},</p>
+            
+            <p>ขอบคุณสำหรับการลงทะเบียนใช้บริการของเรา โปรดคลิกที่ปุ่มด้านล่างเพื่อยืนยันที่อยู่อีเมลของคุณ:</p>
+            
+            <a href="{{.VerificationURL}}" class="button">ยืนยันอีเมล</a>
+            
+            <p>หากคุณมีปัญหาในการคลิกปุ่มด้านบน คุณสามารถคัดลอกและวาง URL ด้านล่างลงในเบราว์เซอร์ของคุณ:</p>
+            
+            <p style="word-break: break-all;">{{.VerificationURL}}</p>
+            
+            <div class="expiry">
+                <p>หมายเหตุ: ลิงก์นี้จะหมดอายุใน {{.ExpiryHours}} ชั่วโมง</p>
+            </div>
+            
+            <p>หากคุณไม่ได้ลงทะเบียนใช้บริการนี้ โปรดเพิกเฉยต่ออีเมลฉบับนี้</p>
+        </div>
+        
+        <div class="footer">
+            <p>นี่เป็นอีเมลที่สร้างขึ้นโดยอัตโนมัติ โปรดอย่าตอบกลับอีเมลนี้</p>
+            <p>&copy; {{.CurrentYear}} Auth Service. สงวนลิขสิทธิ์ทั้งหมด.</p>
+        </div>
+    </div>
+</body>
+</html> 

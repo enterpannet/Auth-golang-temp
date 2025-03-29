@@ -10,41 +10,24 @@ import (
 	"github.com/example/auth-service/config"
 	"github.com/example/auth-service/internal/crypto"
 	"github.com/example/auth-service/internal/logging"
+	"github.com/example/auth-service/internal/mail"
 	"github.com/example/auth-service/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
-// Common errors
-var (
-	ErrInvalidCredentials     = errors.New("invalid credentials")
-	ErrUserNotFound           = errors.New("user not found")
-	ErrEmailAlreadyExists     = errors.New("email already exists")
-	ErrUsernameAlreadyExists  = errors.New("username already exists")
-	ErrTokenInvalid           = errors.New("token is invalid or expired")
-	ErrTokenRevoked           = errors.New("token has been revoked")
-	ErrAccountLocked          = errors.New("account is locked")
-	ErrEmailNotVerified       = errors.New("email is not verified")
-	ErrMFARequired            = errors.New("multi-factor authentication required")
-	ErrMFAInvalid             = errors.New("invalid multi-factor authentication code")
-	ErrPasswordTooWeak        = errors.New("password does not meet strength requirements")
-	ErrInvalidRecoveryCode    = errors.New("invalid or expired recovery code")
-	ErrMFAAlreadyEnabled      = errors.New("multi-factor authentication is already enabled")
-	ErrMFANotEnabled          = errors.New("multi-factor authentication is not enabled")
-	ErrOAuthProviderNotFound  = errors.New("OAuth provider not found")
-	ErrOAuthProviderSetupFail = errors.New("failed to setup OAuth provider")
-)
-
-// Service provides authentication and authorization functionality
+// Service handles authentication operations
 type Service struct {
-	Config       *config.Config
-	DB           *gorm.DB
-	PasswordHash *crypto.PasswordHasher
-	JWTManager   *crypto.JWTManager
-	TOTPManager  *crypto.TOTPManager
-	OAuthManager *crypto.OAuthManager
-	Encryptor    *crypto.Encryptor
-	AuditLogger  *logging.AuditLogger
+	Config        *config.Config
+	DB            *gorm.DB
+	PasswordHash  *crypto.PasswordHasher
+	JWTManager    *crypto.JWTManager
+	TOTPManager   *crypto.TOTPManager
+	OAuthManager  *crypto.OAuthManager
+	Encryptor     *crypto.Encryptor
+	EmailVerifier *crypto.EmailVerifier
+	Mailer        *mail.Mailer
+	AuditLogger   *logging.AuditLogger
 }
 
 // NewService creates a new authentication service
@@ -56,17 +39,21 @@ func NewService(
 	totpManager *crypto.TOTPManager,
 	oauthManager *crypto.OAuthManager,
 	encryptor *crypto.Encryptor,
+	emailVerifier *crypto.EmailVerifier,
+	mailer *mail.Mailer,
 	auditLogger *logging.AuditLogger,
 ) *Service {
 	return &Service{
-		Config:       cfg,
-		DB:           db,
-		PasswordHash: passwordHash,
-		JWTManager:   jwtManager,
-		TOTPManager:  totpManager,
-		OAuthManager: oauthManager,
-		Encryptor:    encryptor,
-		AuditLogger:  auditLogger,
+		Config:        cfg,
+		DB:            db,
+		PasswordHash:  passwordHash,
+		JWTManager:    jwtManager,
+		TOTPManager:   totpManager,
+		OAuthManager:  oauthManager,
+		Encryptor:     encryptor,
+		EmailVerifier: emailVerifier,
+		Mailer:        mailer,
+		AuditLogger:   auditLogger,
 	}
 }
 
@@ -216,11 +203,12 @@ type LoginInput struct {
 
 // LoginOutput represents the output for user login
 type LoginOutput struct {
-	User         models.User
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    time.Time
-	RequiresMFA  bool
+	User          models.User
+	AccessToken   string
+	RefreshToken  string
+	ExpiresAt     time.Time
+	RequiresMFA   bool
+	NeedsMFASetup bool
 }
 
 // Login authenticates a user
@@ -266,22 +254,36 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, er
 		return nil, ErrInvalidCredentials
 	}
 
-	// If MFA is enabled, check TOTP code
-	if user.TOTPEnabled {
+	// If MFA is enabled for this user or globally required, check TOTP code
+	if user.TOTPEnabled || s.Config.Auth.MFARequired {
 		// If TOTP code is not provided, return MFA required error
 		if input.TOTPCode == "" {
 			return &LoginOutput{
-				User:        user,
-				RequiresMFA: true,
+				User:          user,
+				RequiresMFA:   true,
+				NeedsMFASetup: s.Config.Auth.MFARequired && !user.TOTPEnabled,
 			}, nil
 		}
 
-		// Verify TOTP code
-		valid, err := s.TOTPManager.ValidateTOTP(user.TOTPSecret, input.TOTPCode, 1)
-		if err != nil || !valid {
-			// Log failed MFA attempt
-			s.AuditLogger.LogLogin(ctx, user.ID, input.ClientIP, input.UserAgent, false, "Invalid MFA code")
-			return nil, ErrMFAInvalid
+		// For users who have not set up MFA yet but it's globally required,
+		// we cannot validate, so we need to prompt them to set up MFA
+		if s.Config.Auth.MFARequired && !user.TOTPEnabled {
+			return &LoginOutput{
+				User:          user,
+				RequiresMFA:   true,
+				NeedsMFASetup: true,
+			}, nil
+		}
+
+		// Verify TOTP code for users who have set it up
+		if user.TOTPEnabled {
+			// Verify TOTP code
+			valid, err := s.TOTPManager.ValidateTOTP(user.TOTPSecret, input.TOTPCode, 1)
+			if err != nil || !valid {
+				// Log failed MFA attempt
+				s.AuditLogger.LogLogin(ctx, user.ID, input.ClientIP, input.UserAgent, false, "Invalid MFA code")
+				return nil, ErrMFAInvalid
+			}
 		}
 	}
 
@@ -343,11 +345,12 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginOutput, er
 	s.AuditLogger.LogLogin(ctx, user.ID, input.ClientIP, input.UserAgent, true, "Login successful")
 
 	return &LoginOutput{
-		User:         user,
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenString,
-		ExpiresAt:    time.Now().Add(s.Config.Auth.AccessTokenExpiry),
-		RequiresMFA:  false,
+		User:          user,
+		AccessToken:   accessToken,
+		RefreshToken:  refreshTokenString,
+		ExpiresAt:     time.Now().Add(s.Config.Auth.AccessTokenExpiry),
+		RequiresMFA:   false,
+		NeedsMFASetup: false,
 	}, nil
 }
 

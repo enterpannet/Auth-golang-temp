@@ -3,21 +3,26 @@ package api
 import (
 	"github.com/example/auth-service/config"
 	"github.com/example/auth-service/internal/auth"
+	"github.com/example/auth-service/internal/controllers"
+	"github.com/example/auth-service/internal/crypto"
 	"github.com/example/auth-service/internal/middleware"
+	"github.com/example/auth-service/internal/webhook"
 	"github.com/gin-gonic/gin"
 )
 
 // Router is the HTTP router for the API
 type Router struct {
-	Config      *config.Config
-	AuthHandler *auth.Handler
+	Config         *config.Config
+	AuthService    *auth.Service
+	WebhookService *webhook.WebhookService
 }
 
 // NewRouter creates a new API router
-func NewRouter(cfg *config.Config, authHandler *auth.Handler) *Router {
+func NewRouter(cfg *config.Config, authService *auth.Service, webhookService *webhook.WebhookService) *Router {
 	return &Router{
-		Config:      cfg,
-		AuthHandler: authHandler,
+		Config:         cfg,
+		AuthService:    authService,
+		WebhookService: webhookService,
 	}
 }
 
@@ -58,6 +63,12 @@ func (r *Router) Setup() *gin.Engine {
 	// CORS middleware
 	router.Use(r.ginCorsMiddleware())
 
+	// Create controllers
+	authController := controllers.NewAuthController(r.Config, r.AuthService)
+	mfaController := controllers.NewMFAController(r.Config, r.AuthService)
+	adminController := controllers.NewAdminController(r.Config, r.AuthService)
+	verificationController := controllers.NewVerificationController(r.Config, r.AuthService)
+
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
@@ -66,17 +77,233 @@ func (r *Router) Setup() *gin.Engine {
 	// Auth routes - public
 	auth := router.Group("/auth")
 	{
-		auth.POST("/register", r.AuthHandler.GinRegister)
-		auth.POST("/login", r.AuthHandler.GinLogin)
-		auth.POST("/refresh", r.AuthHandler.GinRefreshToken)
+		auth.POST("/register", authController.Register)
+		auth.POST("/login", authController.Login)
+		auth.POST("/refresh", authController.RefreshToken)
 
 		// Auth routes - protected
 		protected := auth.Group("")
 		protected.Use(middleware.GinAuthMiddleware(r.Config))
-		protected.POST("/logout", r.AuthHandler.GinLogout)
+		protected.POST("/logout", authController.Logout)
+
+		// MFA routes - protected
+		mfa := protected.Group("/mfa")
+		{
+			// Setup MFA - returns secret and QR code URL
+			mfa.POST("/setup", mfaController.SetupMFA)
+
+			// Verify and enable MFA with a TOTP code
+			mfa.POST("/verify", mfaController.VerifyMFA)
+
+			// Disable MFA
+			mfa.POST("/disable", mfaController.DisableMFA)
+
+			// Generate new backup codes
+			mfa.POST("/backup-codes", mfaController.GenerateBackupCodes)
+		}
+
+		// Email verification routes
+		auth.GET("/verify-email", verificationController.VerifyEmail)
+		auth.GET("/resend-verification", middleware.GinAuthMiddleware(r.Config), verificationController.ResendVerificationEmail)
+	}
+
+	// Example CRUD API routes
+	// This demonstrates how to structure both public and protected routes
+	api := router.Group("/api/v1")
+	{
+		// Public routes - no authentication required
+		// Example: Product listing and details can be viewed without login
+		products := api.Group("/products")
+		{
+			products.GET("", r.handleListProducts)          // List all products
+			products.GET("/:id", r.handleGetProduct)        // Get a product by ID
+			products.GET("/search", r.handleSearchProducts) // Search products
+		}
+
+		// Protected routes - authentication required
+		// Adding the GinAuthMiddleware to the group makes all routes inside require authentication
+		protected := api.Group("")
+		protected.Use(middleware.GinAuthMiddleware(r.Config))
+		{
+			// User profile - requires authentication
+			users := protected.Group("/users")
+			{
+				users.GET("/me", r.handleGetCurrentUser)              // Get current user profile
+				users.PUT("/me", r.handleUpdateCurrentUser)           // Update current user profile
+				users.DELETE("/me", r.handleDeleteCurrentUser)        // Delete current user account
+				users.GET("/me/orders", r.handleGetCurrentUserOrders) // Get current user orders
+			}
+
+			// Admin routes - requires authentication + admin role
+			// You can add role-based middleware here if needed
+			admin := protected.Group("/admin")
+			admin.Use(r.adminRoleRequired())
+			{
+				// User management (admin only)
+				admin.GET("/users", adminController.ListUsers)                             // List all users
+				admin.GET("/users/:id", adminController.GetUser)                           // Get a user by ID
+				admin.POST("/users", adminController.CreateUser)                           // Create a user
+				admin.PUT("/users/:id", adminController.UpdateUser)                        // Update a user
+				admin.DELETE("/users/:id", adminController.DeleteUser)                     // Delete a user
+				admin.POST("/users/:id/reset-password", adminController.ResetUserPassword) // Reset user password
+
+				// Roles management
+				admin.GET("/roles", adminController.ListRoles) // List all roles
+
+				// Product management (admin only) - Legacy examples
+				admin.POST("/products", r.handleCreateProduct)       // Create a product
+				admin.PUT("/products/:id", r.handleUpdateProduct)    // Update a product
+				admin.DELETE("/products/:id", r.handleDeleteProduct) // Delete a product
+			}
+
+			// Customer specific routes - requires authentication
+			orders := protected.Group("/orders")
+			{
+				orders.POST("", r.handleCreateOrder)           // Create an order
+				orders.GET("", r.handleListOrders)             // List user's orders
+				orders.GET("/:id", r.handleGetOrder)           // Get order by ID
+				orders.PUT("/:id/cancel", r.handleCancelOrder) // Cancel an order
+			}
+		}
+	}
+
+	// Webhook routes
+	webhooks := router.Group("/webhooks")
+	{
+		webhooks.POST("/line", func(c *gin.Context) {
+			r.WebhookService.HandleWebhook(c.Writer, c.Request, webhook.PlatformLine)
+		})
+
+		// Facebook needs both GET (for verification) and POST (for events)
+		webhooks.Any("/facebook", func(c *gin.Context) {
+			r.WebhookService.HandleWebhook(c.Writer, c.Request, webhook.PlatformFacebook)
+		})
+
+		webhooks.POST("/twitter", func(c *gin.Context) {
+			r.WebhookService.HandleWebhook(c.Writer, c.Request, webhook.PlatformTwitter)
+		})
 	}
 
 	return router
+}
+
+// adminRoleRequired middleware checks if the user has admin role
+func (r *Router) adminRoleRequired() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Get claims from context
+		claims, exists := c.Get("user_claims")
+		if !exists {
+			c.JSON(403, gin.H{"error": "Forbidden: admin access required"})
+			c.Abort()
+			return
+		}
+
+		// Type assert to get roles
+		claimsObj, ok := claims.(*crypto.Claims)
+		if !ok {
+			c.JSON(403, gin.H{"error": "Forbidden: invalid claims"})
+			c.Abort()
+			return
+		}
+
+		// Check if user has admin role
+		hasAdminRole := false
+		for _, role := range claimsObj.Roles {
+			if role == "admin" {
+				hasAdminRole = true
+				break
+			}
+		}
+
+		if !hasAdminRole {
+			c.JSON(403, gin.H{"error": "Forbidden: admin access required"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// Example handler implementations (placeholders)
+func (r *Router) handleListProducts(c *gin.Context) {
+	// Example implementation
+	c.JSON(200, gin.H{"products": []gin.H{
+		{"id": "1", "name": "Product 1", "price": 99.99},
+		{"id": "2", "name": "Product 2", "price": 149.99},
+	}})
+}
+
+func (r *Router) handleGetProduct(c *gin.Context) {
+	id := c.Param("id")
+	c.JSON(200, gin.H{"id": id, "name": "Product " + id, "price": 99.99})
+}
+
+func (r *Router) handleSearchProducts(c *gin.Context) {
+	query := c.Query("q")
+	c.JSON(200, gin.H{"query": query, "products": []gin.H{
+		{"id": "1", "name": "Product 1", "price": 99.99},
+	}})
+}
+
+func (r *Router) handleGetCurrentUser(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{"id": userID, "name": "Current User", "email": "user@example.com"})
+}
+
+func (r *Router) handleUpdateCurrentUser(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{"id": userID, "message": "User updated successfully"})
+}
+
+func (r *Router) handleDeleteCurrentUser(c *gin.Context) {
+	c.JSON(200, gin.H{"message": "User deleted successfully"})
+}
+
+func (r *Router) handleGetCurrentUserOrders(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{"user_id": userID, "orders": []gin.H{
+		{"id": "1", "total": 99.99, "status": "completed"},
+		{"id": "2", "total": 149.99, "status": "processing"},
+	}})
+}
+
+func (r *Router) handleCreateProduct(c *gin.Context) {
+	c.JSON(201, gin.H{"id": "3", "message": "Product created successfully"})
+}
+
+func (r *Router) handleUpdateProduct(c *gin.Context) {
+	id := c.Param("id")
+	c.JSON(200, gin.H{"id": id, "message": "Product updated successfully"})
+}
+
+func (r *Router) handleDeleteProduct(c *gin.Context) {
+	id := c.Param("id")
+	c.JSON(200, gin.H{"id": id, "message": "Product deleted successfully"})
+}
+
+func (r *Router) handleCreateOrder(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	c.JSON(201, gin.H{"user_id": userID, "order_id": "3", "message": "Order created successfully"})
+}
+
+func (r *Router) handleListOrders(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{"user_id": userID, "orders": []gin.H{
+		{"id": "1", "total": 99.99, "status": "completed"},
+		{"id": "2", "total": 149.99, "status": "processing"},
+	}})
+}
+
+func (r *Router) handleGetOrder(c *gin.Context) {
+	id := c.Param("id")
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{"id": id, "user_id": userID, "total": 99.99, "status": "completed"})
+}
+
+func (r *Router) handleCancelOrder(c *gin.Context) {
+	id := c.Param("id")
+	c.JSON(200, gin.H{"id": id, "message": "Order cancelled successfully"})
 }
 
 // ginCorsMiddleware adds CORS headers to the response

@@ -11,6 +11,8 @@ import (
 	"github.com/example/auth-service/internal/crypto"
 	"github.com/example/auth-service/internal/database"
 	"github.com/example/auth-service/internal/logging"
+	"github.com/example/auth-service/internal/mail"
+	"github.com/example/auth-service/internal/webhook"
 	_ "github.com/lib/pq"
 )
 
@@ -49,12 +51,29 @@ func main() {
 	// Create encryptor
 	encryptor := crypto.NewEncryptor(cfg)
 
+	// Create email verifier
+	emailVerifier := crypto.NewEmailVerifier(cfg)
+
+	// Create mailer service
+	mailer := mail.NewMailer(cfg)
+
 	// Create audit logger
 	auditLogger, err := logging.NewAuditLogger(db.DB, cfg)
 	if err != nil {
 		log.Fatalf("Failed to create audit logger: %v", err)
 	}
 	defer auditLogger.Close()
+
+	// Create webhook service
+	webhookService := webhook.NewWebhookService(cfg, auditLogger)
+
+	// Register sample handlers
+	lineHandler := &webhook.LineMessageHandler{}
+	webhookService.RegisterHandler(webhook.PlatformLine, webhook.EventMessage, lineHandler)
+	webhookService.RegisterHandler(webhook.PlatformLine, webhook.EventFollow, lineHandler)
+
+	fbHandler := &webhook.FacebookMessageHandler{}
+	webhookService.RegisterHandler(webhook.PlatformFacebook, webhook.EventMessage, fbHandler)
 
 	// Create auth service with all dependencies
 	authService := auth.NewService(
@@ -65,14 +84,13 @@ func main() {
 		totpManager,
 		oauthManager,
 		encryptor,
+		emailVerifier,
+		mailer,
 		auditLogger,
 	)
 
-	// Create auth handler
-	authHandler := auth.NewHandler(cfg, authService)
-
-	// Setup router
-	router := api.NewRouter(cfg, authHandler)
+	// Create router with webhook service
+	router := api.NewRouter(cfg, authService, webhookService)
 	ginEngine := router.Setup()
 
 	// Start server

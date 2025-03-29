@@ -14,7 +14,11 @@ type Config struct {
 	Encryption     EncryptionConfig `json:"encryption"`
 	Audit          AuditConfig      `json:"audit"`
 	Security       SecurityConfig   `json:"security"`
+	Mail           MailConfig       `json:"mail"`
 	AllowedOrigins []string         `json:"allowed_origins"`
+
+	// Webhook configuration
+	Webhook WebhookConfig `mapstructure:"webhook"`
 }
 
 // ServerConfig represents the server configuration
@@ -43,6 +47,7 @@ type AuthConfig struct {
 	AccessTokenExpiry        time.Duration                  `json:"access_token_expiry"`
 	RefreshTokenExpiry       time.Duration                  `json:"refresh_token_expiry"`
 	TOTPIssuer               string                         `json:"totp_issuer"`
+	MFARequired              bool                           `json:"mfa_required"`
 	PasswordMinLength        int                            `json:"password_min_length"`
 	PasswordRequireUppercase bool                           `json:"password_require_uppercase"`
 	PasswordRequireSpecial   bool                           `json:"password_require_special"`
@@ -52,6 +57,9 @@ type AuthConfig struct {
 	CookieSecure             bool                           `json:"cookie_secure"`
 	SessionCookieName        string                         `json:"session_cookie_name"`
 	CookieSameSite           string                         `json:"cookie_same_site"`
+	VerificationRequired     bool                           `json:"verification_required"`
+	VerificationTokenExpiry  time.Duration                  `json:"verification_token_expiry"`
+	VerificationRedirectURL  string                         `json:"verification_redirect_url"`
 }
 
 // OAuthProviderConfig represents configuration for an OAuth provider
@@ -97,6 +105,50 @@ type RateLimitConfig struct {
 	BlacklistedIPs      []string      `json:"blacklisted_ips"`
 }
 
+// MailConfig represents mail server settings
+type MailConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	FromEmail     string `json:"from_email"`
+	FromName      string `json:"from_name"`
+	UseSSL        bool   `json:"use_ssl"`
+	UseTLS        bool   `json:"use_tls"`
+	TemplatesPath string `json:"templates_path"`
+}
+
+// WebhookConfig contains webhook configurations
+type WebhookConfig struct {
+	// Line webhook configuration
+	Line struct {
+		Enabled       bool   `mapstructure:"enabled"`
+		ChannelID     string `mapstructure:"channel_id"`
+		ChannelSecret string `mapstructure:"channel_secret"`
+		CallbackURL   string `mapstructure:"callback_url"`
+	} `mapstructure:"line"`
+
+	// Facebook webhook configuration
+	Facebook struct {
+		Enabled     bool   `mapstructure:"enabled"`
+		AppID       string `mapstructure:"app_id"`
+		AppSecret   string `mapstructure:"app_secret"`
+		VerifyToken string `mapstructure:"verify_token"`
+		CallbackURL string `mapstructure:"callback_url"`
+	} `mapstructure:"facebook"`
+
+	// Twitter webhook configuration
+	Twitter struct {
+		Enabled           bool   `mapstructure:"enabled"`
+		ConsumerKey       string `mapstructure:"consumer_key"`
+		ConsumerSecret    string `mapstructure:"consumer_secret"`
+		AccessToken       string `mapstructure:"access_token"`
+		AccessTokenSecret string `mapstructure:"access_token_secret"`
+		CallbackURL       string `mapstructure:"callback_url"`
+	} `mapstructure:"twitter"`
+}
+
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -123,6 +175,7 @@ func DefaultConfig() *Config {
 			AccessTokenExpiry:        15 * time.Minute,
 			RefreshTokenExpiry:       7 * 24 * time.Hour,
 			TOTPIssuer:               "Auth Service",
+			MFARequired:              false,
 			PasswordMinLength:        8,
 			PasswordRequireUppercase: false,
 			PasswordRequireSpecial:   false,
@@ -150,10 +203,13 @@ func DefaultConfig() *Config {
 					UserInfoURL:  "https://api.github.com/user",
 				},
 			},
-			CookieDomain:      "localhost",
-			CookieSecure:      false,
-			SessionCookieName: "refresh_token",
-			CookieSameSite:    "lax",
+			CookieDomain:            "localhost",
+			CookieSecure:            false,
+			SessionCookieName:       "refresh_token",
+			CookieSameSite:          "lax",
+			VerificationRequired:    true,
+			VerificationTokenExpiry: 24 * time.Hour,
+			VerificationRedirectURL: "http://localhost:3000/verification-success",
 		},
 		Encryption: EncryptionConfig{
 			AESKey:        []byte("a-thirty-two-byte-key-for-aes-gcm!"),
@@ -180,6 +236,19 @@ func DefaultConfig() *Config {
 				BlacklistedIPs:      []string{},
 			},
 		},
+		Mail: MailConfig{
+			Enabled:       true,
+			Host:          "smtp.example.com",
+			Port:          587,
+			Username:      "noreply@example.com",
+			Password:      "your-smtp-password",
+			FromEmail:     "noreply@example.com",
+			FromName:      "Auth Service",
+			UseSSL:        false,
+			UseTLS:        true,
+			TemplatesPath: "templates/email",
+		},
 		AllowedOrigins: []string{"*"},
+		Webhook:        DefaultWebhookConfig(),
 	}
 }
